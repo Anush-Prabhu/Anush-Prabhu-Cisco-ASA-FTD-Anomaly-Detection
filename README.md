@@ -1,134 +1,87 @@
 # Cisco ASA / FTD Log Anomaly Detection
 
-Machine learning workflows for detecting unusual activity in Cisco Adaptive Security Appliance (ASA) and Firepower Threat Defense (FTD) firewall logs. The project combines rule-based labeling, supervised classification, unsupervised scoring, and time-series spike detection.
+Synthetic firewall log generation and anomaly classification for Cisco ASA and FTD syslog data.
 
-## Overview
+## What it does
 
-Firewall devices emit high-volume syslog messages identified by signature IDs (for example `ASA-6-302013`, `FTD-6-430003`). This repository provides two Jupyter notebooks:
+`Cisco_bd.ipynb` runs end to end:
 
-| Notebook | Purpose |
-|----------|---------|
-| `Cisco_bd.ipynb` | Builds a synthetic ASA/FTD log dataset, applies rule-based anomaly labels, and trains a Random Forest classifier |
-| `Signature_logs.ipynb` | Scores a labeled log CSV with Isolation Forest, evaluates against ground truth, and detects per-signature rate spikes |
+1. Generates synthetic ASA/FTD log events
+2. Labels rows as normal or anomalous using configurable rules
+3. Trains a Random Forest classifier and evaluates results
 
-Together they cover both **supervised baseline modeling** (when labels exist) and **unsupervised detection** (when only normal traffic is assumed at training time).
+No external dataset is required.
 
-## Features
-
-### Synthetic data generation (`Cisco_bd.ipynb`)
-
-- Generates ~9,600 rows across 16 ASA/FTD message signatures
-- Fields include timestamp, host, interfaces, zones, five-tuple, user, action, and traffic volume
-- Rule-based labels for:
-  - Blocked or VPN-related actions (`deny`, `teardown`, `vpn`)
-  - Low-severity alerts (severity ≤ 4)
-  - Off-hours activity (configurable business hours and weekend handling)
-  - High traffic volume (mean + 3σ on `bytes_transferred`)
-- Random Forest pipeline with one-hot encoding for categorical fields
-- Feature importance chart and confusion matrix
-
-### Log scoring and spike detection (`Signature_logs.ipynb`)
-
-- Loads `Signature_logs.csv` (25,000 rows, 20 columns)
-- Feature engineering: message ID encoding, protocol mapping, time-of-day fields
-- **Isolation Forest** trained on known-normal rows only (`is_anomaly == False`)
-- Exports scored results and top anomalies
-- **Rolling z-score spike detection** per `msg_id` over one-minute buckets (120-minute window)
-
-## Requirements
-
-- Python 3.10+
-- Jupyter Notebook or JupyterLab
-
-Install dependencies:
+## Setup
 
 ```bash
 pip install -r requirements.txt
+jupyter notebook
 ```
 
-## Usage
+Open `Cisco_bd.ipynb` and run all cells.
 
-### 1. Supervised baseline
+## Generated log fields
 
-Open `Cisco_bd.ipynb` and run all cells. The notebook generates data in memory, assigns labels, trains the classifier, and prints a classification report.
+Each row includes:
 
-Key configuration at the top of the final pipeline cell:
+- `timestamp`, `host`, `msg_id`, `severity`, `conn_id`
+- `ingress_iface`, `egress_iface`, `ingress_zone`, `egress_zone`
+- `src_ip`, `dst_ip`, `src_port`, `dst_port`, `protocol`
+- `user`, `action`, `bytes_transferred`, `message`
+- Derived: `hour`, `minute`, `weekday`, `msg_id_code`, `protocol_num`
+
+Roughly 9,600 rows are created across 16 message signatures (600 per signature).
+
+## Anomaly rules
+
+A row is marked anomalous if any rule matches:
+
+| Label | Trigger |
+|-------|---------|
+| `blocked_or_vpn` | `action` is `deny`, `teardown`, or `vpn` |
+| `low_severity_alert` | `severity` ≤ 4 |
+| `off_hours` | Outside business hours, or on weekends when enabled |
+| `high_traffic_volume` | `bytes_transferred` exceeds mean + 3σ |
+
+When multiple rules apply, reasons are joined in `anomaly_type` (semicolon-separated).
+
+## Configuration
+
+Adjust these values in the notebook:
 
 ```python
-NORMAL_HOURS = (8, 18)
+NORMAL_HOURS = (8, 18)              # normal window: 08:00–17:59
 TREAT_WEEKENDS_AS_OFFHOURS = True
 ROWS_PER_SIGNATURE = 600
 RANDOM_STATE = 42
 ```
 
-### 2. Unsupervised scoring
+## Model
 
-Place `Signature_logs.csv` in the project root (same directory as the notebook). Expected columns:
+- Algorithm: Random Forest (`n_estimators=250`)
+- Preprocessing: one-hot encoding for categorical columns, passthrough for numeric
+- Split: 80/20 train/test, stratified on `is_anomaly`
 
-```
-timestamp, host, msg_id, severity, message, src_ip, src_port, dst_ip, dst_port,
-protocol, ingress_iface, egress_iface, ingress_zone, egress_zone, acl_name, user,
-action, conn_id, is_anomaly, anomaly_type
-```
+The notebook also plots top feature importances and a confusion matrix.
 
-Run `Signature_logs.ipynb`. Output files:
-
-| File | Description |
-|------|-------------|
-| `asa_ftd_scored.csv` | Full dataset with `iforest_score` and `iforest_pred` |
-| `asa_ftd_top50_iforest.csv` | 50 lowest-scoring (most anomalous) events |
-| `asa_ftd_spikes.csv` | Minute-bucket spikes where z-score > 4.0 |
-
-## Anomaly labeling logic
-
-Rules in `Cisco_bd.ipynb` mark a row as anomalous when any condition matches:
-
-| Rule | Condition |
-|------|-----------|
-| `blocked_or_vpn` | `action` in `deny`, `teardown`, `vpn` |
-| `low_severity_alert` | `severity` ≤ 4 |
-| `off_hours` | Outside configured business hours, or weekend if enabled |
-| `high_traffic_volume` | `bytes_transferred` > mean + 3σ |
-
-Multiple reasons are stored in `anomaly_type` as a semicolon-separated string.
-
-## Isolation Forest settings
-
-| Parameter | Value |
-|-----------|-------|
-| `n_estimators` | 200 |
-| `max_samples` | 0.8 |
-| `contamination` | 0.03 |
-| Training data | Rows where `is_anomaly == False` |
-| Features | `msg_id_code`, `severity`, `src_port`, `dst_port`, `protocol_num`, `hour`, `minute`, `weekday` |
-
-Lower `iforest_score` values indicate stronger anomaly signals.
-
-## Project structure
+## Message signatures
 
 ```
-.
-├── Cisco_bd.ipynb          # Synthetic data + supervised Random Forest
-├── Signature_logs.ipynb    # Isolation Forest scoring + spike detection
-├── requirements.txt
-└── README.md
+ASA-6-302013   ASA-6-302014   ASA-6-302015   ASA-6-302016
+FTD-6-302015   FTD-6-302014   FTD-6-302016
+ASA-4-106023   ASA-6-106100   ASA-6-106102   ASA-6-106103
+ASA-6-605005   ASA-5-111008   ASA-5-111010
+FTD-6-430003   FTD-6-430002
 ```
 
-## Supported log signatures
+## Files
 
 ```
-ASA-6-302013, ASA-6-302014, ASA-6-302015, ASA-6-302016
-FTD-6-302015, FTD-6-302014, FTD-6-302016
-ASA-4-106023, ASA-6-106100, ASA-6-106102, ASA-6-106103
-ASA-6-605005, ASA-5-111008, ASA-5-111010
-FTD-6-430003, FTD-6-430002
+Cisco_bd.ipynb
+requirements.txt
+README.md
 ```
-
-## Notes
-
-- Synthetic data is for development and model prototyping; tune thresholds before production use.
-- Isolation Forest recall on rare anomalies depends heavily on `contamination` and the normal-only training set.
-- Spike detection uses a 120-minute rolling window with a minimum of 30 observations per series.
 
 ## License
 
